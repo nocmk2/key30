@@ -3,7 +3,7 @@ import AppKit
 
 private enum CapsuleLayout {
     static let visualWidth: CGFloat = 190
-    static let visualHeight: CGFloat = 34
+    static let visualHeight: CGFloat = 17
     static let shadowInsetHorizontal: CGFloat = 16
     static let shadowInsetTop: CGFloat = 12
     static let shadowInsetBottom: CGFloat = 24
@@ -209,14 +209,14 @@ struct CapsuleView: View {
                 .stroke(primary.opacity(isHovered ? 1.0 : 0.8), lineWidth: isHovered ? 1.5 : 1.0)
 
             if viewModel.isActive, let keyName = viewModel.keyName {
-                HStack(spacing: 7) {
+                HStack(spacing: 4) {
                     Image(systemName: "keyboard")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 7, weight: .bold))
                     Text(keyName)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .font(.system(size: 8, weight: .bold, design: .rounded))
                     if let duration = viewModel.duration {
                         Text("\(Int(duration * 1000))ms")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 7, weight: .semibold, design: .monospaced))
                             .opacity(0.85)
                     }
                 }
@@ -224,7 +224,7 @@ struct CapsuleView: View {
                 .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 1)
             }
         }
-        .frame(width: isHovered ? 180 : 170, height: isHovered ? 22 : 20)
+        .frame(width: isHovered ? 180 : 170, height: isHovered ? 11 : 10)
         .shadow(color: primary.opacity(isHovered ? 0.55 : 0.35), radius: isHovered ? 13 : 8, x: 0, y: isHovered ? 6 : 4)
         .frame(width: CapsuleLayout.visualWidth, height: CapsuleLayout.visualHeight)
         .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
@@ -249,7 +249,7 @@ final class CapsuleViewModel: ObservableObject {
 
     var renderedColors: [Color] {
         if isActive {
-            return colors.map { $0.opacity(0.72) }
+            return colors.map { $0.opacity(0.60) }
         }
         return colors
     }

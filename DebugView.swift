@@ -342,28 +342,40 @@ struct StatsDashboardView: View {
 
     private var language: AppSettings.Language { settings.language }
 
-    private var topKeys: [(String, Int)] {
-        let keyUps = debugger.allEvents.filter { $0.kind == .keyUp || $0.kind == .modifierUp }
+    private struct SessionStats {
+        var totalKeystrokes = 0
+        var avgDuration: TimeInterval = 0
+        var topKeys: [(String, Int)] = []
+        var maxCount: Int { topKeys.first?.1 ?? 1 }
+    }
+
+    /// Single pass over allEvents per render (previously the body triggered
+    /// four separate full-array passes: total, average, topKeys, maxCount).
+    private var sessionStats: SessionStats {
+        var stats = SessionStats()
         var counts: [String: Int] = [:]
-        for event in keyUps {
+        var durationSum: TimeInterval = 0
+        var durationCount = 0
+
+        for event in debugger.allEvents where event.kind == .keyUp || event.kind == .modifierUp {
+            stats.totalKeystrokes += 1
             counts[event.keyName, default: 0] += 1
+            if let duration = event.duration {
+                durationSum += duration
+                durationCount += 1
+            }
         }
-        return counts.sorted { $0.value > $1.value }.prefix(5).map { $0 }
-    }
 
-    private var maxCount: Int {
-        topKeys.first?.1 ?? 1
-    }
-
-    private var avgDuration: TimeInterval {
-        let keyUps = debugger.allEvents
-            .filter { $0.kind == .keyUp || $0.kind == .modifierUp }
-            .compactMap { $0.duration }
-        if keyUps.isEmpty { return 0 }
-        return keyUps.reduce(0, +) / Double(keyUps.count)
+        if durationCount > 0 {
+            stats.avgDuration = durationSum / Double(durationCount)
+        }
+        stats.topKeys = counts.sorted { $0.value > $1.value }.prefix(5).map { $0 }
+        return stats
     }
 
     var body: some View {
+        let stats = sessionStats
+
         VStack(spacing: 0) {
             HStack {
                 Text(language == .english ? "Session Statistics" : "按键统计数据")
@@ -379,13 +391,13 @@ struct StatsDashboardView: View {
                     HStack(spacing: 16) {
                         StatCard(
                             title: language == .english ? "Total Keystrokes" : "总按键次数",
-                            value: "\(debugger.allEvents.filter { $0.kind == .keyUp || $0.kind == .modifierUp }.count)",
+                            value: "\(stats.totalKeystrokes)",
                             icon: "keyboard.fill",
                             color: .blue
                         )
                         StatCard(
                             title: language == .english ? "Avg Hold Duration" : "平均按住时长",
-                            value: String(format: "%.0f ms", avgDuration * 1000),
+                            value: String(format: "%.0f ms", stats.avgDuration * 1000),
                             icon: "timer",
                             color: .orange
                         )
@@ -397,21 +409,21 @@ struct StatsDashboardView: View {
                             .font(.headline)
                             .foregroundColor(.secondary)
 
-                        if topKeys.isEmpty {
+                        if stats.topKeys.isEmpty {
                             Text(language == .english ? "Not enough data yet." : "暂无足够数据")
                                 .foregroundColor(.secondary)
                                 .frame(height: 150)
                                 .frame(maxWidth: .infinity)
                         } else {
                             VStack(spacing: 12) {
-                                ForEach(topKeys, id: \.0) { key, count in
+                                ForEach(stats.topKeys, id: \.0) { key, count in
                                     HStack {
                                         Text(key)
                                             .font(.system(size: 13, weight: .bold, design: .monospaced))
                                             .frame(width: 80, alignment: .trailing)
 
                                         GeometryReader { proxy in
-                                            let barWidth = proxy.size.width * CGFloat(count) / CGFloat(maxCount)
+                                            let barWidth = proxy.size.width * CGFloat(count) / CGFloat(stats.maxCount)
                                             ZStack(alignment: .leading) {
                                                 Capsule()
                                                     .fill(Color.gray.opacity(0.1))

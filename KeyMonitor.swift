@@ -36,7 +36,7 @@ final class KeyMonitor: ObservableObject {
     private let settings: AppSettings
     private var localMonitor: Any?
     private var globalMonitor: Any?
-    private var updateTimer: Timer?
+    private var pendingTriggerTasks: [UInt16: DispatchWorkItem] = [:]
     private var capsuleHideTask: DispatchWorkItem?
     private var typingResetTask: DispatchWorkItem?
 
@@ -61,10 +61,6 @@ final class KeyMonitor: ObservableObject {
             self?.handleKeyEvent(event)
         }
 
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.checkPressedKeys()
-        }
-
         isMonitoring = true
         print("🟢 Key30 monitoring started")
     }
@@ -80,8 +76,8 @@ final class KeyMonitor: ObservableObject {
             globalMonitor = nil
         }
 
-        updateTimer?.invalidate()
-        updateTimer = nil
+        pendingTriggerTasks.values.forEach { $0.cancel() }
+        pendingTriggerTasks.removeAll()
 
         currentPressedKeys.removeAll()
         capsuleHideTask?.cancel()
@@ -97,38 +93,53 @@ final class KeyMonitor: ObservableObject {
     }
 
     private func handleKeyEvent(_ event: NSEvent) {
-        DispatchQueue.main.async { [weak self] in
+        // Capture event data immediately: NSEvent must not be retained across
+        // threads, and capturing the timestamp here avoids run-loop hop jitter.
+        let keyCode = event.keyCode
+        let type = event.type
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let timestamp = Date()
+
+        let work = { [weak self] in
             guard let self = self else { return }
 
-            switch event.type {
+            switch type {
             case .keyDown:
-                if self.currentPressedKeys[event.keyCode] == nil {
-                    let keyName = KeyNames.name(for: event.keyCode)
+                if self.currentPressedKeys[keyCode] == nil {
+                    let keyName = KeyNames.name(for: keyCode)
                     self.markTypingActivity(keyName: keyName)
-                    self.currentPressedKeys[event.keyCode] = KeyPressInfo(
-                        keyCode: event.keyCode,
+                    self.currentPressedKeys[keyCode] = KeyPressInfo(
+                        keyCode: keyCode,
                         keyName: keyName,
-                        startTime: Date(),
+                        startTime: timestamp,
                         hasTriggered: false
                     )
+                    self.scheduleTrigger(for: keyCode)
                 }
 
             case .keyUp:
-                self.currentPressedKeys.removeValue(forKey: event.keyCode)
+                self.cancelTrigger(for: keyCode)
+                self.currentPressedKeys.removeValue(forKey: keyCode)
                 self.hideCapsuleIfNoTriggeredKeys()
 
             case .flagsChanged:
-                self.handleModifierKey(event)
+                self.handleModifierKey(keyCode: keyCode, flags: flags, timestamp: timestamp)
 
             default:
                 break
             }
         }
+
+        // NSEvent monitors fire on the main thread; run inline to avoid an
+        // extra run-loop hop per keystroke.
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
-    private func handleModifierKey(_ event: NSEvent) {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let keyCode = event.keyCode
+    private func handleModifierKey(keyCode: UInt16, flags: NSEvent.ModifierFlags, timestamp: Date) {
         let isPressed = flags.contains(.shift) ||
             flags.contains(.control) ||
             flags.contains(.option) ||
@@ -141,27 +152,37 @@ final class KeyMonitor: ObservableObject {
             currentPressedKeys[keyCode] = KeyPressInfo(
                 keyCode: keyCode,
                 keyName: keyName,
-                startTime: Date(),
+                startTime: timestamp,
                 hasTriggered: false
             )
+            scheduleTrigger(for: keyCode)
         } else if !isPressed && currentPressedKeys[keyCode] != nil {
+            cancelTrigger(for: keyCode)
             currentPressedKeys.removeValue(forKey: keyCode)
             hideCapsuleIfNoTriggeredKeys()
         }
     }
 
-    private func checkPressedKeys() {
-        let now = Date()
+    /// Schedules a one-shot trigger exactly at the hold threshold instead of
+    /// polling all pressed keys on a 20 Hz timer. Zero wakeups while idle and
+    /// millisecond-accurate trigger timing.
+    private func scheduleTrigger(for keyCode: UInt16) {
+        pendingTriggerTasks[keyCode]?.cancel()
 
-        for (keyCode, var info) in currentPressedKeys {
-            let duration = now.timeIntervalSince(info.startTime)
-
-            if duration >= thresholdSeconds && !info.hasTriggered {
-                info.hasTriggered = true
-                currentPressedKeys[keyCode] = info
-                triggerCapsule(keyName: info.keyName, duration: duration)
-            }
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pendingTriggerTasks[keyCode] = nil
+            guard let info = self.currentPressedKeys[keyCode], !info.hasTriggered else { return }
+            self.currentPressedKeys[keyCode]?.hasTriggered = true
+            self.triggerCapsule(keyName: info.keyName, duration: Date().timeIntervalSince(info.startTime))
         }
+        pendingTriggerTasks[keyCode] = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + thresholdSeconds, execute: task)
+    }
+
+    private func cancelTrigger(for keyCode: UInt16) {
+        pendingTriggerTasks[keyCode]?.cancel()
+        pendingTriggerTasks[keyCode] = nil
     }
 
     private func triggerCapsule(keyName: String, duration: TimeInterval) {

@@ -16,6 +16,7 @@ mkdir -p "$BUILD_DIR"
 echo "📦 Compiling Swift sources..."
 
 swiftc \
+    -O -wmo \
     -o "$BUILD_DIR/$APP_NAME" \
     -framework AppKit \
     -framework SwiftUI \

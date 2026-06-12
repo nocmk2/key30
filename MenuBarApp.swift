@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @main
 struct Key30App: App {
@@ -21,7 +22,7 @@ final class Key30AppDelegate: NSObject, NSApplicationDelegate, ObservableObject 
     private lazy var capsuleManager = CapsuleManager(settings: settings)
     private var dashboardWindow: NSWindow?
     private let dashboardState = DashboardState()
-    private var capsuleCheckTimer: Timer?
+    private var cancellables = Set<AnyCancellable>()
     private var lastShowState = false
     private var lastCapsuleKey: String?
     private var lastCapsuleDuration: TimeInterval?
@@ -44,9 +45,16 @@ final class Key30AppDelegate: NSObject, NSApplicationDelegate, ObservableObject 
         }
         capsuleManager.reset()
 
-        capsuleCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.syncCapsule()
-        }
+        // Event-driven capsule sync (replaces the former 10 Hz polling timer):
+        // zero idle wakeups and the capsule reacts immediately instead of up
+        // to 100 ms later.
+        monitor.$showCapsule
+            .combineLatest(monitor.$capsuleInfo)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] showCapsule, capsuleInfo in
+                self?.syncCapsule(showCapsule: showCapsule, capsuleInfo: capsuleInfo)
+            }
+            .store(in: &cancellables)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -77,8 +85,7 @@ final class Key30AppDelegate: NSObject, NSApplicationDelegate, ObservableObject 
     }
 
     @objc func quit() {
-        capsuleCheckTimer?.invalidate()
-        capsuleCheckTimer = nil
+        cancellables.removeAll()
         monitor.stop()
         capsuleManager.hide()
         NSApp.terminate(nil)
@@ -162,8 +169,8 @@ final class Key30AppDelegate: NSObject, NSApplicationDelegate, ObservableObject 
         updateMenu()
     }
 
-    private func syncCapsule() {
-        if monitor.showCapsule, let info = monitor.capsuleInfo {
+    private func syncCapsule(showCapsule: Bool, capsuleInfo: KeyMonitor.CapsuleInfo?) {
+        if showCapsule, let info = capsuleInfo {
             if !lastShowState || lastCapsuleKey != info.keyName || lastCapsuleDuration != info.duration {
                 capsuleManager.show(keyName: info.keyName, duration: info.duration)
             }
@@ -175,6 +182,6 @@ final class Key30AppDelegate: NSObject, NSApplicationDelegate, ObservableObject 
             capsuleManager.reset()
         }
 
-        lastShowState = monitor.showCapsule
+        lastShowState = showCapsule
     }
 }

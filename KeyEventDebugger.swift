@@ -23,16 +23,33 @@ struct KeyEventRecord: Identifiable {
     let keyName: String
     let duration: TimeInterval?
     let systemMessage: SystemMessage?
+    /// Pre-formatted once at creation; the debug list re-renders all visible
+    /// rows on every incoming event, so formatting lazily per render would
+    /// invoke DateFormatter ~80x per keystroke.
+    let timeString: String
+
+    init(
+        timestamp: Date,
+        kind: EventKind,
+        keyCode: UInt16,
+        keyName: String,
+        duration: TimeInterval?,
+        systemMessage: SystemMessage?
+    ) {
+        self.timestamp = timestamp
+        self.kind = kind
+        self.keyCode = keyCode
+        self.keyName = keyName
+        self.duration = duration
+        self.systemMessage = systemMessage
+        self.timeString = Self.timeFormatter.string(from: timestamp)
+    }
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
         return formatter
     }()
-
-    var timeString: String {
-        Self.timeFormatter.string(from: timestamp)
-    }
 }
 
 final class KeyEventDebugger: ObservableObject {
@@ -40,6 +57,7 @@ final class KeyEventDebugger: ObservableObject {
     @Published var events: [KeyEventRecord] = []
     @Published var allEvents: [KeyEventRecord] = []
     @Published var maxEvents = 80
+    @Published var maxAllEvents = 5000
 
     private var localMonitor: Any?
     private var globalMonitor: Any?
@@ -83,20 +101,26 @@ final class KeyEventDebugger: ObservableObject {
     }
 
     private func handleKeyEvent(_ event: NSEvent) {
-        DispatchQueue.main.async { [weak self] in
+        // Capture immediately so the recorded timestamp reflects the actual
+        // event time, not when a queued main-thread block eventually runs.
+        let keyCode = event.keyCode
+        let type = event.type
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let timestamp = Date()
+
+        let work = { [weak self] in
             guard let self = self else { return }
 
-            let keyName = KeyNames.name(for: event.keyCode)
-            let timestamp = Date()
+            let keyName = KeyNames.name(for: keyCode)
 
-            switch event.type {
+            switch type {
             case .keyDown:
-                if self.keyPressStartTimes[event.keyCode] == nil {
-                    self.keyPressStartTimes[event.keyCode] = timestamp
+                if self.keyPressStartTimes[keyCode] == nil {
+                    self.keyPressStartTimes[keyCode] = timestamp
                     self.addEvent(KeyEventRecord(
                         timestamp: timestamp,
                         kind: .keyDown,
-                        keyCode: event.keyCode,
+                        keyCode: keyCode,
                         keyName: keyName,
                         duration: nil,
                         systemMessage: nil
@@ -104,29 +128,34 @@ final class KeyEventDebugger: ObservableObject {
                 }
 
             case .keyUp:
-                let duration = self.keyPressStartTimes[event.keyCode].map { timestamp.timeIntervalSince($0) }
-                self.keyPressStartTimes.removeValue(forKey: event.keyCode)
+                let duration = self.keyPressStartTimes[keyCode].map { timestamp.timeIntervalSince($0) }
+                self.keyPressStartTimes.removeValue(forKey: keyCode)
 
                 self.addEvent(KeyEventRecord(
                     timestamp: timestamp,
                     kind: .keyUp,
-                    keyCode: event.keyCode,
+                    keyCode: keyCode,
                     keyName: keyName,
                     duration: duration,
                     systemMessage: nil
                 ))
 
             case .flagsChanged:
-                self.handleFlagsChanged(event, keyName: keyName, timestamp: timestamp)
+                self.handleFlagsChanged(keyCode: keyCode, flags: flags, keyName: keyName, timestamp: timestamp)
 
             default:
                 break
             }
         }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
-    private func handleFlagsChanged(_ event: NSEvent, keyName: String, timestamp: Date) {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    private func handleFlagsChanged(keyCode: UInt16, flags: NSEvent.ModifierFlags, keyName: String, timestamp: Date) {
         let isPressed = flags.contains(.shift) ||
             flags.contains(.control) ||
             flags.contains(.option) ||
@@ -135,25 +164,25 @@ final class KeyEventDebugger: ObservableObject {
             flags.contains(.function)
 
         if isPressed {
-            if keyPressStartTimes[event.keyCode] == nil {
-                keyPressStartTimes[event.keyCode] = timestamp
+            if keyPressStartTimes[keyCode] == nil {
+                keyPressStartTimes[keyCode] = timestamp
                 addEvent(KeyEventRecord(
                     timestamp: timestamp,
                     kind: .modifierDown,
-                    keyCode: event.keyCode,
+                    keyCode: keyCode,
                     keyName: keyName,
                     duration: nil,
                     systemMessage: nil
                 ))
             }
         } else {
-            let duration = keyPressStartTimes[event.keyCode].map { timestamp.timeIntervalSince($0) }
-            keyPressStartTimes.removeValue(forKey: event.keyCode)
+            let duration = keyPressStartTimes[keyCode].map { timestamp.timeIntervalSince($0) }
+            keyPressStartTimes.removeValue(forKey: keyCode)
 
             addEvent(KeyEventRecord(
                 timestamp: timestamp,
                 kind: .modifierUp,
-                keyCode: event.keyCode,
+                keyCode: keyCode,
                 keyName: keyName,
                 duration: duration,
                 systemMessage: nil
@@ -168,7 +197,16 @@ final class KeyEventDebugger: ObservableObject {
         if events.count > maxEvents {
             events.removeLast()
         }
+
+        // Amortized trim: removeFirst on a 5000-element array is O(n), so
+        // trimming on every event once full would shift ~5000 elements per
+        // keystroke. Trim in batches instead (O(1) amortized).
+        if allEvents.count > maxAllEvents + trimBatchSize {
+            allEvents.removeFirst(allEvents.count - maxAllEvents)
+        }
     }
+
+    private let trimBatchSize = 512
 
     private func addSystemEvent(_ message: KeyEventRecord.SystemMessage) {
         addEvent(KeyEventRecord(
